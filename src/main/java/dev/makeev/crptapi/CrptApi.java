@@ -115,6 +115,10 @@ public class CrptApi implements AutoCloseable {
                             "Обязательные параметры не могут быть null"));
         }
 
+        return getDocumentResponseCompletableFuture(document, productGroupCode, signature, token);
+    }
+
+    private CompletableFuture<DocumentResponse> getDocumentResponseCompletableFuture(Document document, int productGroupCode, String signature, String token) {
         var future = new CompletableFuture<DocumentResponse>();
 
         var offered = requestQueue.offer(() -> {
@@ -132,7 +136,6 @@ public class CrptApi implements AutoCloseable {
             future.complete(new DocumentResponse("REQUEST_LIMIT_EXCEEDED",
                     "Превышен лимит запросов", "Превышен лимит запросов"));
         }
-
         return future;
     }
 
