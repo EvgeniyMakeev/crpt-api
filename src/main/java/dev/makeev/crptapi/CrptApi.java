@@ -37,7 +37,7 @@ public class CrptApi implements AutoCloseable {
     private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
     private static final int HTTP_CREATED = 201;
 
-    private final BlockingQueue<Runnable> requestQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<Runnable> requestQueue = new LinkedBlockingQueue<>(1000);
     private final ScheduledExecutorService scheduler;
     private final ExecutorService executor;
     private final AtomicBoolean isShutdown = new AtomicBoolean(false);
@@ -48,19 +48,12 @@ public class CrptApi implements AutoCloseable {
     private final long intervalMillis;
 
     public CrptApi(TimeUnit timeUnit, int requestLimit) {
-        if (requestLimit <= 0) {
-            throw new IllegalArgumentException("Request limit должен быть больше 0");
-        }
-        if (timeUnit == null) {
-            throw new IllegalArgumentException("TimeUnit не может быть null");
-        }
+        checkArguments(timeUnit, requestLimit);
 
         this.requestLimit = requestLimit;
         this.intervalMillis = timeUnit.toMillis(1);
-
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> getThread(r, "CrptApi-Scheduler"));
         this.executor = Executors.newSingleThreadExecutor(r -> getThread(r, "CrptApi-Executor"));
-
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -70,10 +63,34 @@ public class CrptApi implements AutoCloseable {
         startDispatcher();
     }
 
-    private static Thread getThread(Runnable r, String name) {
-        var thread = new Thread(r, name);
+    private static void checkArguments(TimeUnit timeUnit, int requestLimit) {
+        if (requestLimit <= 0) {
+            throw new IllegalArgumentException("Request limit должен быть больше 0");
+        }
+        if (timeUnit == null) {
+            throw new IllegalArgumentException("TimeUnit не может быть null");
+        }
+    }
+
+    private static Thread getThread(Runnable runnable, String name) {
+        var thread = new Thread(runnable, name);
         thread.setDaemon(true);
         return thread;
+    }
+
+    private void startDispatcher() {
+        scheduler.scheduleAtFixedRate(() -> {
+            if (isShutdown.get()) {
+                return;
+            }
+
+            for (int i = 0; i < requestLimit && !requestQueue.isEmpty(); i++) {
+                var task = requestQueue.poll();
+                if (task != null) {
+                    executor.submit(task);
+                }
+            }
+        }, 0, intervalMillis, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -100,17 +117,21 @@ public class CrptApi implements AutoCloseable {
 
         var future = new CompletableFuture<DocumentResponse>();
 
-        requestQueue.offer(() -> {
+        boolean offered = requestQueue.offer(() -> {
             try {
-                DocumentResponse response = send(document, productGroupCode, signature, token);
+                var response = send(document, productGroupCode, signature, token);
                 future.complete(response);
             } catch (Exception e) {
                 LOGGER.severe("Ошибка при выполнении запроса: " + e.getMessage());
-                future.complete(new DocumentResponse("INTERNAL_ERROR",
-                        "Внутренняя ошибка: " + e.getMessage(),
-                        "Внутренняя ошибка"));
+                CompletableFuture.completedFuture(
+                        new DocumentResponse("INTERNAL_ERROR", e.getMessage(), "Внутренняя ошибка"));
             }
         });
+
+        if (!offered) {
+            future.complete(new DocumentResponse("REQUEST_LIMIT_EXCEEDED",
+                    "Превышен лимит запросов", "Превышен лимит запросов"));
+        }
 
         return future;
     }
@@ -138,7 +159,7 @@ public class CrptApi implements AutoCloseable {
                         jsonNode.get("error_message").asText() : "HTTP Error " + response.statusCode();
                 String description = jsonNode.has("description") ?
                         jsonNode.get("description").asText() : response.body();
-                    
+
                 return new DocumentResponse(code, errorMessage, description);
             } catch (Exception parseEx) {
                 return new DocumentResponse(
@@ -162,12 +183,12 @@ public class CrptApi implements AutoCloseable {
                                          String signature, String token) throws JsonProcessingException {
         var documentJson = objectMapper.writeValueAsString(document);
         var documentBase64 = Base64.getEncoder().encodeToString(documentJson.getBytes());
-        var productGroup = getProductGroup(productGroupCode);
+        var productGroup = ProductGroup.fromCode(productGroupCode);
 
-        CreateDocumentRequest requestBody = new CreateDocumentRequest(
+        var requestBody = new CreateDocumentRequest(
                 FIXED_DOCUMENT_FORMAT,
                 documentBase64,
-                productGroup.orElse(null),
+                productGroup.map(ProductGroup::getApiValue).orElse(null),
                 signature,
                 FIXED_DOCUMENT_TYPE
         );
@@ -182,60 +203,6 @@ public class CrptApi implements AutoCloseable {
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(requestBody)))
                 .timeout(HTTP_TIMEOUT)
                 .build();
-    }
-
-    private static Optional<String> getProductGroup(int productGroupCode) {
-        String productGroup;
-        switch (productGroupCode) {
-            case 1:
-                productGroup = "clothes";
-                break;
-            case 2:
-                productGroup = "shoes";
-                break;
-            case 3:
-                productGroup = "tobacco";
-                break;
-            case 4:
-                productGroup = "perfumery";
-                break;
-            case 5:
-                productGroup = "tires";
-                break;
-            case 6:
-                productGroup = "electronics";
-                break;
-            case 7:
-                productGroup = "pharma";
-                break;
-            case 8:
-                productGroup = "milk";
-                break;
-            case 9:
-                productGroup = "bicycle";
-                break;
-            case 10:
-                productGroup = "wheelchairs";
-                break;
-            default:
-                productGroup = null;
-        }
-        return Optional.ofNullable(productGroup);
-    }
-
-    private void startDispatcher() {
-        scheduler.scheduleAtFixedRate(() -> {
-            if (isShutdown.get()) {
-                return;
-            }
-
-            for (int i = 0; i < requestLimit && !requestQueue.isEmpty(); i++) {
-                var task = requestQueue.poll();
-                if (task != null) {
-                    executor.submit(task);
-                }
-            }
-        }, 0, intervalMillis, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -262,6 +229,45 @@ public class CrptApi implements AutoCloseable {
             }
         }
     }
+
+    public enum ProductGroup {
+        CLOTHES(1, "clothes"),
+        SHOES(2, "shoes"),
+        TOBACCO(3, "tobacco"),
+        PERFUMERY(4, "perfumery"),
+        TIRES(5, "tires"),
+        ELECTRONICS(6, "electronics"),
+        PHARMA(7, "pharma"),
+        MILK(8, "milk"),
+        BICYCLE(9, "bicycle"),
+        WHEELCHAIRS(10, "wheelchairs");
+
+        private final int code;
+        private final String apiValue;
+
+        ProductGroup(int code, String apiValue) {
+            this.code = code;
+            this.apiValue = apiValue;
+        }
+
+        public int getCode() {
+            return code;
+        }
+
+        public String getApiValue() {
+            return apiValue;
+        }
+
+        public static Optional<ProductGroup> fromCode(int code) {
+            for (ProductGroup group : values()) {
+                if (group.code == code) {
+                    return Optional.of(group);
+                }
+            }
+            return Optional.empty();
+        }
+    }
+
 
     private static class CreateDocumentRequest {
         @JsonProperty("document_format")

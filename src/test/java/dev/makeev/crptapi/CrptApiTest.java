@@ -120,13 +120,13 @@ class CrptApiTest {
             var future1 = limitedApi.createDocument(buildValidDocument(), 1, "sig1", "token");
             var future2 = limitedApi.createDocument(buildValidDocument(), 1, "sig2", "token");
 
-            future1.get(5, TimeUnit.SECONDS);
-            future2.get(5, TimeUnit.SECONDS);
+            future1.get();
+            future2.get();
 
             long duration = System.currentTimeMillis() - startTime;
 
-            assertTrue(duration >= 950,
-                    String.format("Ожидалась задержка минимум 950ms, получено %dms", duration));
+            assertTrue(duration > 1000,
+                    String.format("Ожидалась задержка минимум 1001ms, получено %dms", duration));
 
             verify(mockClient, times(2)).send(any(), any());
         }
@@ -149,13 +149,13 @@ class CrptApiTest {
             }
 
             for (var future : futures) {
-                future.get(10, TimeUnit.SECONDS);
+                future.get(3, TimeUnit.SECONDS);
             }
 
             long duration = System.currentTimeMillis() - startTime;
 
-            assertTrue(duration >= 1950,
-                    String.format("Ожидалась задержка минимум 1950ms, получено %dms", duration));
+            assertTrue(duration > 2000,
+                    String.format("Ожидалась задержка минимум 2001ms, получено %dms", duration));
 
             verify(mockClient, times(5)).send(any(), any());
         }
